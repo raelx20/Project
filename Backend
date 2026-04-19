@@ -1,1 +1,236 @@
+import math
 
+# ---------- COMMON ----------
+def clamp(x, lo=0.0, hi=1.0):
+    return max(lo, min(x, hi))
+
+
+# ---------- SCORES ----------
+def compute_asi(marks, exam, year):
+    if year == 1:
+        m = marks / 500
+        e = exam / 360
+    else:
+        m = marks / 100
+        e = exam / 100
+    return clamp(m * 0.6 + e * 0.4)
+
+def compute_fns(income, family_size, expenses):
+    family_size = max(family_size, 1)
+    income_pc = income / family_size
+    need = 1 - clamp(income_pc / 2000000)
+    expense_ratio = expenses / income if income > 0 else 1
+    expense_score = clamp(expense_ratio, 0, 1.5) / 1.5
+    return clamp(need * 0.7 + expense_score * 0.3)
+
+def compute_crs(credit_score, defaults):
+    base = clamp((credit_score - 300) / 600)
+    penalty = min(0.1 * defaults, 0.3)
+    return clamp(base - penalty)
+
+def compute_ics(rank, placement):
+    rank = max(1, min(rank, 1000))
+    rank_score = 1 - (math.log(rank) / math.log(1000))
+    placement_score = clamp(placement / 100)
+    return clamp(rank_score * 0.7 + placement_score * 0.3)
+
+def compute_lrs(loans, income, emi):
+    max_loans = max(income * 2, 100000)
+    loan_score = 1 - clamp(loans / max_loans)
+
+    if income > 0:
+        emi_ratio = emi / (income / 12)
+    else:
+        emi_ratio = 1
+
+    if emi_ratio <= 0.3:
+        emi_score = 1
+    else:
+        emi_score = clamp(1 - (emi_ratio - 0.3) * 1.2)
+
+    return clamp(loan_score * 0.6 + emi_score * 0.4)
+
+def compute_pps(ASI, ICS, FNS, attempts):
+    factor = max(0.7, 1 - 0.1 * (attempts - 1))
+    return clamp((ASI * 0.4 + ICS * 0.3 + FNS * 0.3) * factor)
+
+
+# ---------- LOAN ----------
+def compute_max_loan(income, PPS, ICS):
+    base = 500000
+    amount = (base + income * 0.3 + base * PPS * 0.5) * (1 + ICS * 0.5)
+    return round(max(50000, min(amount, 2000000)), 0)
+
+def decide_loan_type(financial, potential):
+    if financial >= 0.65:
+        return "Standard"
+    elif potential >= 0.7:
+        return "Income-Based"
+    return "Not Eligible"
+
+
+# ---------- DISBURSEMENT ----------
+def create_disbursement(loan_type, amount, year):
+    if loan_type == "Standard":
+        return {
+            "type": "Full",
+            "status": "Active",
+            "approved": amount,
+            "released": amount,
+            "remaining": 0,
+            "schedule": [{"stage": "Full", "amount": amount, "released": True}]
+        }
+
+    remaining_years = max(1, 5 - year)
+    yearly = amount / remaining_years
+
+    return {
+        "type": "Phased",
+        "status": "Active",
+        "approved": amount,
+        "released": 0,
+        "remaining": amount,
+        "schedule": [
+            {"year": y, "amount": round(yearly, 0), "released": False}
+            for y in range(year, 5)
+        ]
+    }
+
+
+# ---------- RISK + CONTROL ----------
+def evaluate_risk(current_ASI, prev_ASI=None, missed=0):
+    flags = []
+    if current_ASI < 0.6:
+        flags.append("LOW")
+    if prev_ASI and current_ASI < prev_ASI - 0.05:
+        flags.append("DROP")
+    if missed >= 2:
+        flags.append("MISSED")
+
+    level = "Low" if len(flags) == 0 else "Medium" if len(flags) == 1 else "High"
+    return {"flags": flags, "level": level}
+
+def apply_controls(disb, risk):
+    if risk["level"] == "Medium":
+        for s in disb["schedule"]:
+            if not s.get("released"):
+                s["amount"] = round(s["amount"] * 0.8, 0)
+                break
+    elif risk["level"] == "High":
+        disb["status"] = "Paused"
+    return disb
+
+
+# ---------- RELEASE ----------
+def release_next(disb, current_ASI, prev_ASI=None, missed=0):
+    risk = evaluate_risk(current_ASI, prev_ASI, missed)
+    disb = apply_controls(disb, risk)
+
+    if disb["status"] == "Paused":
+        return "Paused due to risk", disb, risk
+
+    for s in disb["schedule"]:
+        if not s.get("released"):
+            if current_ASI >= 0.65:
+                s["released"] = True
+                disb["released"] += s["amount"]
+                disb["remaining"] -= s["amount"]
+                break
+            else:
+                return "Performance too low", disb, risk
+
+    if disb["remaining"] <= 0:
+        disb["status"] = "Completed"
+
+    return "Installment released", disb, risk
+
+def resume_if_improved(disb, current_ASI):
+    if disb["status"] == "Paused" and current_ASI >= 0.7:
+        disb["status"] = "Active"
+        return "Resumed"
+    return "No change"
+
+def get_status(disb):
+    return {
+        "status": disb["status"],
+        "released": disb["released"],
+        "remaining": disb["remaining"],
+        "progress_%": round((disb["released"] / disb["approved"]) * 100, 2)
+        if disb["approved"] > 0 else 0
+    }
+
+
+# ---------- INPUT ----------
+def get_input():
+    year = int(input("Year of Study (1-4): ") or 1)
+
+    if year == 1:
+        marks = float(input("Final Exam Marks (0-500): ") or 0)
+        exam = float(input("Competitive Exam Score (0-360): ") or 0)
+    else:
+        cgpa = float(input("Current CGPA (0-10): ") or 0)
+        marks = (cgpa / 10) * 100
+        exam = (cgpa / 10) * 100
+
+    return {
+        "year": year,
+        "marks": marks,
+        "exam": exam,
+        "attempts": int(input("Attempts: ") or 1),
+        "income": float(input("Annual Income: ") or 0),
+        "family": int(input("Family Size: ") or 1),
+        "expenses": float(input("Annual Expenses: ") or 0),
+        "credit": float(input("Credit Score: ") or 300),
+        "defaults": int(input("Number of loans not paid in time: ") or 0),
+        "rank": int(input("Institution Rank: ") or 1000),
+        "placement": float(input("Placement %: ") or 60),
+        "loans": float(input("Existing Loans: ") or 0),
+        "emi": float(input("Monthly EMI: ") or 0)
+    }
+
+
+# ---------- MAIN ----------
+data = get_input()
+
+ASI = compute_asi(data["marks"], data["exam"], data["year"])
+FNS = compute_fns(data["income"], data["family"], data["expenses"])
+CRS = compute_crs(data["credit"], data["defaults"])
+ICS = compute_ics(data["rank"], data["placement"])
+LRS = compute_lrs(data["loans"], data["income"], data["emi"])
+PPS = compute_pps(ASI, ICS, FNS, data["attempts"])
+
+financial = FNS * 0.5 + LRS * 0.3 + CRS * 0.2
+potential = ASI * 0.4 + ICS * 0.2 + PPS * 0.4
+
+status = "Approved (Financial)" if financial >= 0.65 else \
+         "Approved (Potential)" if potential >= 0.7 else "Rejected"
+
+print("\nStatus:", status)
+
+if "Approved" in status:
+    max_loan = compute_max_loan(data["income"], PPS, ICS)
+    print("Max Eligible Loan:", max_loan)
+
+    required = float(input("Enter Required Loan Amount: ") or 0)
+    if required > max_loan:
+        print("Exceeds limit, adjusted to max.")
+        required = max_loan
+
+    loan_type = decide_loan_type(financial, potential)
+    print("Loan Type:", loan_type)
+
+    disb = create_disbursement(loan_type, required, data["year"])
+    print("\nInitial Disbursement:", disb)
+
+    # simulate tracking
+    msg, disb, risk = release_next(disb, current_ASI=ASI)
+    print("\nUpdate:", msg)
+    print("Risk:", risk)
+    print("Status:", get_status(disb))
+
+    # resume example
+    resume_msg = resume_if_improved(disb, current_ASI=ASI)
+    print("Resume Check:", resume_msg)
+
+else:
+    print("Loan Rejected")
